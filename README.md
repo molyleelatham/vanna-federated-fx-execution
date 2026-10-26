@@ -1,196 +1,135 @@
-# Vanna
+# Vanna: federated FX execution intelligence
 
-Vanna is a Flower-powered, federated FX execution-intelligence prototype for
-the 2026 Cambridge Collaborative Agent Hackathon. It demonstrates that the
-tightest displayed quote is not always the best executable quote.
+In FX, the tightest quote on screen is not always the cheapest trade to finish: a liquidity provider can reject the order at the last moment, and a desk cannot pool the raw orders that would show who actually fills.
 
-Five simulated desks train on private execution histories. Flower aggregates
-their model updates. Six typed agent roles cover execution value, last look,
-counterparty reliability, margin pressure, manipulation signals, and
-governance, sequenced by the merged OrchestratorAgent with per-agent
-`explain()` contributions. Raw orders, client identities, UTIs, and live
-intentions never enter the shared payload.
+*Built at the Flower Cambridge Federated AI hackathon, top 5. See [HACKATHON.md](HACKATHON.md).*
 
-## Architecture
+## What it does
 
-```text
-Five private desk partitions
-        │ model updates only
-        ▼
-Flower ClientApp + ServerApp (FedXgbBagging; opt-in FedAvg + SecAgg+ mode)
-        │ approved aggregate evidence
-        ▼
-Vanna Agent → specialist typed handoffs
-        ├── LastLookAgent
-        ├── CounterpartyRiskAgent
-        ├── MarginAgent
-        └── ManipulationWatch
-                 │
-                 ▼
-GovernanceAgent → recommendation / fallback / human review
+Vanna is a prototype for that problem. Five desks train a shared model on private execution histories, and only model updates leave a desk. A fixed chain of typed agents reads the shared evidence and produces an advisory recommendation. Governance checks sit in front of the answer, and a person has the final say.
+
+Desk data in this repository is **synthetic**. It is generated from per-desk profiles, so the system can be run from end to end without real trading records.
+
+## How it works
+
+```mermaid
+flowchart TB
+    subgraph Desks["Five private desk partitions"]
+        D0[Desk 0] & D1[Desk 1] & D2[Desk 2] & D3[Desk 3] & D4[Desk 4]
+    end
+    Desks -- model updates only --> S["Flower ServerApp<br/>FedXgbBagging by default<br/>or FedAvg + SecAgg+"]
+    S --> E["provider_evidence.json<br/>raw_records_shared: 0"]
+    E --> O[OrchestratorAgent]
+    O --> V[Vanna]
+    V --> LL[LastLookAgent]
+    LL --> CR[CounterpartyRiskAgent]
+    CR --> MG[MarginAgent]
+    MG --> MW[ManipulationWatch]
+    MW --> G[GovernanceAgent]
+    G --> OUT["Recommendation, local fallback, or human review"]
+    UI[React dashboard] --> GW["Local gateway :8010"] --> AA[Flower AgentApp via SuperLink] --> O
 ```
 
-Flower App Bundles cannot combine an `AgentApp` with a
-`ServerApp`/`ClientApp` pair, so the repository intentionally contains two
-independent Flower apps:
+1. **Federate.** Each desk trains locally, and Flower merges the updates into one model per round. The default strategy is `FedXgbBagging`. With `secure-aggregation=true`, the run switches to FedAvg over a NumPy logistic model under Flower's `SecAggPlusWorkflow`.
+2. **Export evidence.** The final model produces per-provider estimates of fill probability, rejection, slippage and latency. That approved summary is what gets shared. The export sets `raw_records_shared` to 0, and the provenance block names the source of each field.
+3. **Reason.** `OrchestratorAgent` runs six roles in order: Vanna, LastLook, CounterpartyRisk, Margin, ManipulationWatch, Governance. Each one adds its own `explain()` line.
+4. **Decide.** Governance can allow a local recommendation, ask for a smaller size, use a local fallback, ask for human review, or suppress collective output. The dashboard's approval queue writes a local `PENDING_HUMAN_APPROVAL` audit record and does not place a broker order.
+
+## Technical highlights
+
+- **Federated XGBoost by default** (`apps/federation/vanna_federation/server_app.py`). `CheckpointingFedXgbBagging` wraps Flower's `FedXgbBagging`, saves each round's model, and writes a training manifest (`persistence.py`, `apps/federation/artifacts/training_manifest.json`).
+- **Optional secure aggregation** (`secagg.py`). XGBoost trees cannot be added together, so this mode trains the logistic model instead. The run config sets `num-shares` to 5 and `reconstruction-threshold` to 3. The FedAvg strategy still asks for five clients (`min_available_clients=5`). Both modes export the same evidence schema. A conditional client mod applies `secaggplus_mod` only to SecAgg+ traffic, so both modes share one ClientApp.
+- **Privacy checks in code.** `packages/vanna-core/src/vanna_core/privacy.py` builds desk-local pseudonyms with HMAC-SHA256 and buckets notional and latency. `validate_shared_payload` rejects fields such as `client_id`, `uti`, `exact_notional` and `live_intention`. The federation app keeps its own copy of those checks, and also rejects `hash_id`, `secret` and `vault`. The AgentApp scans the evidence file again before any agent reads it.
+- **The cost comes from code** (`packages/vanna-core/src/vanna_core/decisioning.py`). Expected executable cost = slippage + 2.5 × rejection probability + latency/100 + 2 × (1 − fill probability) − displayed price benefit. Confidence is high, medium or low from the sample count and the age of the evidence. The language model only narrates the result.
+- **Typed hand-offs** in `apps/agent/vanna_agent/agents/` (`orchestrator.py`, `vanna.py`, `last_look.py`, `counterparty_risk.py`, `margin.py`, `manipulation_watch.py`, `governance.py`). Pydantic contracts in `contracts.py` set `extra="forbid"`. `automatic_execution`, `automatic_blacklist`, `collective_instruction` and `misconduct_finding` are typed as `Literal[False]`. Last-look asymmetry is raised as a review signal, and the chain does not turn it into an automatic blacklist.
+- **One desk compared with five** (`apps/agent/vanna_agent/xgboost_local.py`). This trains a model on desk 0's saved partition and compares it, per provider, with the federated ensemble. Both are scored on desk 0's held-out split.
+- **A path with no live services** (`scripts/local_demo.py`). It runs the deterministic pipeline on the last approved evidence file. It does not wait for a Flower server or a model endpoint.
+
+## Finding your way around
+
+A Flower app bundle cannot combine an `AgentApp` with a `ServerApp`/`ClientApp` pair, so the repository has two Flower apps.
 
 ```text
-apps/federation/       five-desk Flower simulation and evidence export
-apps/agent/            all six typed agent roles and current AgentApp entry point
-apps/dashboard/        standalone React dashboard for the demo and evidence review
-packages/vanna-core/   reusable privacy, schemas, scoring, and governance
-scripts/               artifact handoff and deterministic live-path demo
-tests/                 privacy, federation, routing, governance, and agent tests
+apps/federation/       five-desk Flower federation (XGBoost or SecAgg+) and evidence export
+apps/agent/            AgentApp, six agent roles, local gateway, connectors
+apps/dashboard/        React dashboard for running the chain and reviewing evidence
+packages/vanna-core/   shared privacy, schemas, decisioning and governance
+scripts/               evidence hand-off and the deterministic local run
+tests/                 privacy, federation, SecAgg+, decisioning, agents, gateway
 ```
 
-## Quick start
+`DEMO.md` is the demo script.
 
-Requires Python 3.11+ and `uv`.
+## Testing
+
+`tests/` contains 46 Python tests, covering privacy, both federation modes, federated XGBoost, decisioning, the gateway and every agent.
 
 ```bash
-uv sync
-uv run pytest -q
+uv sync && uv run pytest
+```
+
+That command is the quick start from a fresh clone. XGBoost is a root dependency because the federation tests and the desk comparison import it.
+
+The dashboard has Vitest tests in `apps/dashboard/src/App.test.tsx`, `api.test.ts` and `data/source.test.ts`.
+
+The evidence file's own `provenance` block describes the synthetic inputs. Slippage, latency and rejection come from XGBoost regressions on synthetic desk-profile targets. Displayed price benefit, rejection asymmetry and sample count are fixed synthetic values.
+
+Figures such as the desk-0-only LP_C estimate of about 60% are illustrative examples from the 26 August 2026 run on synthetic data, not benchmarks. They are collected in [HACKATHON.md](HACKATHON.md).
+
+This prototype does not execute trades, blacklist providers, send collective instructions, or replace a compliance system.
+
+## Stack
+
+Python 3.11 or newer, Flower 1.35.0 (simulation, SuperLink, SuperGrid and AgentApp), XGBoost, NumPy, Pydantic and uv. The dashboard uses React, TypeScript, Vite and Vitest. An Alpha Vantage key is optional, and is used only for a public FX quote.
+
+Narration calls an OpenAI Responses-compatible endpoint. The hackathon runs used a hosted Qwen model; the gateway passes `/models/Qwen3.5-397B-A17B-FP8` unless `VANNA_TERMINAL_MODEL_ID` is set. If the AgentApp itself has no model id, it uses `glm-5.2-fp8`. The narration loop exposes six tools, allows at most three turns (`MAX_TOOL_TURNS`), and times out after 120 seconds. If the call fails, the run prints a deterministic write-up of the same pipeline result.
+
+## Running it
+
+```bash
+git clone https://github.com/molyleelatham/vanna-federated-fx-execution.git
+cd vanna-federated-fx-execution
+uv sync && uv run pytest
 uv run python scripts/local_demo.py
 ```
 
-The local demo is the latency-safe path: it never waits for Flower or a model
-endpoint and can use the last approved artifact.
+The local demo needs the installed packages. It does not need a running SuperLink or a model endpoint.
 
-## Run the demo dashboard
-
-The dashboard is a terminal-style React application; it does not sit in either
-Flower FAB. A localhost-only gateway retrieves a public Alpha Vantage FX quote
-when configured, then submits each ticket as a real local-SuperLink AgentApp
-run and waits for its request-scoped structured decision event.
+**Five-desk federation**
 
 ```bash
-# Terminal 1: start the local Flower runtime
+cd apps/federation && uv sync
+uv run flwr run . --federation-config="num-supernodes=5" --stream
+# secure mode: add --run-config "secure-aggregation=true"
+cd ../.. && uv run python scripts/sync_federation_artifact.py
+```
+
+The sync script copies `provider_evidence.json` and the final ensemble into the AgentApp, and converts desk 0's `.npz` partition to JSON for the comparison.
+
+**Dashboard**
+
+```bash
+# Terminal 1
 export FLWR_MODEL_API_ENDPOINT="<full /v1/responses endpoint>"
 uv run flower-superlink --insecure
 
-# Terminal 2: optional public FX quote source (never commit this value)
+# Terminal 2. The Alpha Vantage key is optional and belongs in this environment.
 export ALPHAVANTAGE_API_KEY="<key>"
+cd apps/agent && uv run python -m vanna_agent.gateway   # 127.0.0.1:8010
 
-# Terminal 3: local gateway (port 8010; port 8000 belongs to SuperLink)
-cd apps/agent
-uv run python -m vanna_agent.gateway
-
-# Terminal 4: browser UI (port 5173)
-cd apps/dashboard
-npm install
-npm run dev
+# Terminal 3
+cd apps/dashboard && npm install && npm run dev         # Vite's default port, 5173
 ```
 
-The ticket accepts only pair, side, size bucket, volatility, and available
-providers. `Assess order` queues a real Flower AgentApp run on local SuperLink;
-the UI polls its result instead of falling back to an in-process pipeline.
-`Send to approval queue` writes a local non-executable audit record. It never
-sends a broker/OMS order. Without an Alpha Vantage key or when the provider
-fails, the quote strip labels its safe local fallback.
+The gateway checks SuperLink at `127.0.0.1:9093`. `Assess order` queues a Flower AgentApp run and the page polls for that run's result. `Send to approval queue` writes the local audit record described above. Without an Alpha Vantage key, or if that call fails, the quote strip shows its local fallback.
 
-## Run the real five-desk federation
-
-```bash
-cd apps/federation
-uv sync
-uv run flwr run . --federation-config="num-supernodes=5" --stream
-cd ../..
-uv run python scripts/sync_federation_artifact.py
-```
-
-The run performs three federated rounds, prints measured loss/accuracy and
-round duration, and writes
-`apps/federation/artifacts/generated/provider_evidence.json`.
-The sync script copies only that approved aggregate artifact into the AgentApp.
-
-### Secure aggregation mode (SecAgg+)
-
-Add `--run-config "secure-aggregation=true"` to run the federation under
-Flower's SecAgg+ protocol: every desk update is masked on the client and the
-server only recovers the weighted average across desks — individual updates
-are never visible to the server.
-
-```bash
-cd apps/federation
-uv run flwr run . --federation-config="num-supernodes=5" \
-  --run-config "secure-aggregation=true" --stream
-```
-
-Secure mode trains the transparent NumPy logistic model with FedAvg (SecAgg+
-is a summation protocol and cannot merge XGBoost trees, so the default
-bagging path is unchanged). With `num-shares=5` and
-`reconstruction-threshold=3`, a round completes even if up to two nodes drop
-out. The exported evidence artifact has the identical schema in both modes.
-The flag works for the SuperGrid run as well.
-
-## Build and run the AgentApp
-
-Build the Flower App Bundle:
+**AgentApp on Flower SuperGrid**
 
 ```bash
 cd apps/agent
-uv sync
 uv run flwr build
-```
-
-For SuperGrid:
-
-```bash
 uv run flwr login supergrid
 uv run flwr run . supergrid --stream
 ```
 
-For the hackathon's local SuperLink and AMD Responses-compatible endpoint:
-
-```bash
-export FLWR_MODEL_API_ENDPOINT="<full /v1/responses endpoint>"
-export FLWR_MODEL_API_KEY="<key from the hackathon Slack>"
-export VANNA_MODEL_ID="<matching model ID>"
-uv run flower-superlink --insecure
-```
-
-Run from another terminal using the local SuperLink connection described in
-the current Flower Agent documentation. Qwen does not require
-`FLWR_MODEL_API_KEY`; unset it before starting SuperLink when using that
-endpoint. Restart SuperLink after changing models.
-
-The default structured order is:
-
-```json
-{
-  "pair": "EUR/USD",
-  "side": "BUY",
-  "size_bucket": "1m-5m",
-  "volatility": "high",
-  "available_providers": ["LP_A", "LP_B", "LP_C"]
-}
-```
-
-Override it with `--run-config 'agent.input={...}'`.
-
-## Demo flow (3–5 minutes)
-
-1. Show five isolated desk partitions and the privacy tests.
-2. Show LP_A's tight quote and the local-only uncertainty.
-3. Run the Flower federation and point out `raw-records-shared: 0`.
-4. Sync the aggregate artifact and run Vanna.
-5. Show LP_B winning on expected executable cost.
-6. Show LastLook flagging LP_A's conditional asymmetry as a review signal only.
-7. Show the governance result, human control, and deterministic fallback.
-
-Measured on 2026-08-26: SuperGrid federation run `12309076582906127164`
-(3 rounds, 5/5 nodes, 0 failures, ~2.5 min including FAB upload); SuperGrid
-AgentApp run `1896158749138907396` (~22 s); local SuperLink + Qwen3.5-397B
-narration (~69 s); deterministic local demo (<1 s); SecAgg+ secure-mode
-simulation (3 rounds, 5/5 nodes, 16.4 s). Use only metrics printed by the
-actual run. This prototype does not execute trades, blacklist providers,
-coordinate desks, or replace production compliance systems.
-
-## Source documents
-
-- [Product requirements](PRD_FlowSense_FX_Last_Look.md)
-- [Track 2 infrastructure design](TRACK_2_FlowSense_FX_Infrastructure.md)
-- [Flower framework notes](SKILL_Flower_Framework_Documentation.md)
-
-The legacy source-document filenames predate the final name; their content,
-the implementation, and the submission name use Vanna.
+The SuperNode scripts use the deployment federation `@molyleela/Vanna`. Each desk is started with `supernode_setup.sh` and `start_supernode_desk_{0..4}.sh`. Melanie ran those SuperNodes.
