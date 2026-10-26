@@ -1,10 +1,7 @@
 """Stable agent interfaces for SuperGrid wiring.
 
-Main-branch agents already implement these method names. Prompt aliases
-recommend / analyse / review map to assess() so a later merge is a class
-swap, not a rename.
-
-TODO(merge): import replacement implementations here if main moves modules.
+Agents implement assess(). An optional connectors argument carries live
+SuperLink tools when they are configured; callers omit it on the local path.
 """
 
 from __future__ import annotations
@@ -12,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
+from ..connectors import ConnectorClient
 from ..domain import OrderRequest, ProviderEvidence, Recommendation
 from .contracts import (
     CounterpartyRiskAssessment,
@@ -32,6 +30,7 @@ class VannaLike(Protocol):
         self,
         order: OrderRequest,
         evidence: list[ProviderEvidence],
+        connectors: ConnectorClient | None = None,
         *,
         now: datetime | None = None,
     ) -> Recommendation: ...
@@ -44,6 +43,7 @@ class LastLookLike(Protocol):
         self,
         order: OrderRequest,
         evidence: list[ProviderEvidence],
+        connectors: ConnectorClient | None = None,
     ) -> LastLookAssessment: ...
 
 
@@ -54,25 +54,38 @@ class CounterpartyRiskLike(Protocol):
         self,
         recommendation: Recommendation,
         evidence: list[ProviderEvidence],
+        connectors: ConnectorClient | None = None,
     ) -> CounterpartyRiskAssessment: ...
 
 
 class MarginLike(Protocol):
     name: str
 
-    def assess(self, context: MarginContext) -> MarginAssessment: ...
+    def assess(
+        self,
+        context: MarginContext,
+        connectors: ConnectorClient | None = None,
+    ) -> MarginAssessment: ...
 
 
 class ManipulationWatchLike(Protocol):
     name: str
 
-    def assess(self, context: MarketPatternContext) -> ManipulationAssessment: ...
+    def assess(
+        self,
+        context: MarketPatternContext,
+        connectors: ConnectorClient | None = None,
+    ) -> ManipulationAssessment: ...
 
 
 class GovernanceLike(Protocol):
     name: str
 
-    def assess(self, context: GovernanceContext) -> GovernanceAssessment: ...
+    def assess(
+        self,
+        context: GovernanceContext,
+        connectors: ConnectorClient | None = None,
+    ) -> GovernanceAssessment: ...
 
 
 HANDOFF_CHAIN = (

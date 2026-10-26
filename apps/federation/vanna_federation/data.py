@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
 
 from .desk_config import DeskConfig, DEFAULT_DESK_CONFIGS
+from .privacy import bucket_latency, bucket_notional, pseudonymize
 
 PROVIDERS = ("LP_A", "LP_B", "LP_C")
 FEATURE_NAMES = (
@@ -21,6 +22,34 @@ FEATURE_NAMES = (
     "quote_age_scaled",
 )
 
+_SIZE_COLUMN = FEATURE_NAMES.index("size_scaled")
+_QUOTE_AGE_COLUMN = FEATURE_NAMES.index("quote_age_scaled")
+
+
+@dataclass(frozen=True)
+class LocalAuditEntry:
+    hash_id: str
+    local_order_id: str
+    uti: str
+    client_id: str
+    notional_bucket: str
+    latency_bucket: str
+
+
+@dataclass(frozen=True)
+class DeskVault:
+    """In-memory audit map. Never serialize this into a Flower message."""
+
+    desk_id: int
+    secret: str
+    entries: tuple[LocalAuditEntry, ...] = ()
+
+    def reveal(self, hash_id: str) -> LocalAuditEntry | None:
+        for entry in self.entries:
+            if entry.hash_id == hash_id:
+                return entry
+        return None
+
 
 @dataclass(frozen=True)
 class DeskData:
@@ -28,6 +57,55 @@ class DeskData:
     y_train: NDArray[np.float64]
     x_test: NDArray[np.float64]
     y_test: NDArray[np.float64]
+    vault: DeskVault = field(default_factory=lambda: DeskVault(desk_id=-1, secret=""))
+
+
+def build_desk_vault(
+    partition_id: int,
+    size_scaled: NDArray[np.float64],
+    quote_age_scaled: NDArray[np.float64],
+) -> DeskVault:
+    """HMAC-pseudonymize local order ids. The secret and raw ids stay on the desk."""
+    if size_scaled.shape != quote_age_scaled.shape:
+        raise ValueError("size and quote-age series must match")
+    secret = f"desk-{partition_id}-local-secret"
+    entries: list[LocalAuditEntry] = []
+    for index, (size, quote_age) in enumerate(
+        zip(size_scaled, quote_age_scaled, strict=True)
+    ):
+        local_order_id = f"DESK{partition_id}-ORD-{index:06d}"
+        entries.append(
+            LocalAuditEntry(
+                hash_id=pseudonymize(secret, local_order_id),
+                local_order_id=local_order_id,
+                uti=f"UTI-{partition_id}-{index:06d}",
+                client_id=f"CLIENT-{partition_id}-{(index % 20):03d}",
+                notional_bucket=bucket_notional(float(size) * 10_000_000),
+                latency_bucket=bucket_latency(20.0 + 90.0 * float(quote_age)),
+            )
+        )
+    return DeskVault(desk_id=partition_id, secret=secret, entries=tuple(entries))
+
+
+def vault_from_partition(
+    partition_id: int,
+    x_train: NDArray[np.float64],
+    x_test: NDArray[np.float64],
+) -> DeskVault:
+    """Rebuild the in-memory vault from features. It is not stored on disk."""
+    features = np.concatenate([x_train, x_test])
+    return build_desk_vault(
+        partition_id,
+        features[:, _SIZE_COLUMN],
+        features[:, _QUOTE_AGE_COLUMN],
+    )
+
+
+def require_local_vault(data: DeskData, partition_id: int) -> None:
+    """Check the vault belongs to this desk and stays out of shared replies."""
+    vault = data.vault
+    if vault.desk_id != partition_id or not vault.secret or not vault.entries:
+        raise RuntimeError("desk vault does not match partition")
 
 
 def _sigmoid(value: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -73,7 +151,8 @@ def generate_desk_data(
     )
     y = rng.binomial(1, _sigmoid(logits)).astype(np.float64)
     split = int(samples * 0.8)
-    return DeskData(x[:split], y[:split], x[split:], y[split:])
+    vault = build_desk_vault(config.partition_id, size_scaled, quote_age_scaled)
+    return DeskData(x[:split], y[:split], x[split:], y[split:], vault=vault)
 
 
 def generate_all_desks(
