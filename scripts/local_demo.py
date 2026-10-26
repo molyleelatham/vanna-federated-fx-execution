@@ -22,7 +22,15 @@ ORDER = {
 
 def main() -> None:
     result = run_pipeline(json.dumps(ORDER))
+    print("Vanna local live path (does not call SuperGrid or start a federated round)")
     print(deterministic_answer(result))
+    print(f"Handoff JSON keys: {', '.join(result['handoff_chain'])}")
+    print(
+        "Raw records shared: "
+        f"{result['privacy']['raw_records_shared']}; "
+        "client identities shared: "
+        f"{result['privacy']['client_identities_shared']}"
+    )
 
 
 if __name__ == "__main__":
