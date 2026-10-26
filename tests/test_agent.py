@@ -32,6 +32,8 @@ def test_structured_handoff_and_local_fallback() -> None:
     )
     assert MAX_AGENT_CALLS == 6
     assert result["vanna_recommendation"]["provider"] == "LP_B"
+    assert result["handoff_chain"] == list(HANDOFF_CHAIN)
+    assert result["live_path"] == "local-non-blocking"
     assert "counterparty_risk" in result
     assert "margin" in result
     assert "manipulation" in result
@@ -42,6 +44,7 @@ def test_structured_handoff_and_local_fallback() -> None:
     }
     answer = deterministic_answer(result, "endpoint unavailable")
     assert "deterministic fallback" in answer
+    assert "Handoff:" in answer
     assert "No automatic execution, blacklist" in answer
     assert "CounterpartyRisk" in answer
     assert "Margin" in answer

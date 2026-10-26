@@ -32,7 +32,12 @@ from flwr.compat.common.recorddict_compat import (
     fitres_to_recorddict,
 )
 
-from .data import generate_desk_data_legacy, DeskData
+from .data import (
+    DeskData,
+    generate_desk_data_legacy,
+    require_local_vault,
+    vault_from_partition,
+)
 from .model import (
     accuracy as logistic_accuracy,
     binary_cross_entropy,
@@ -70,8 +75,13 @@ def _resolve_desk_data(partition_id: int, persist: bool) -> DeskData:
     loaded = load_desk_partition(partition_id)
     if loaded:
         _, x_train, y_train, x_test, y_test = loaded
+        # The npz holds features only. Rebuild the vault in this process.
         return DeskData(
-            x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test
+            x_train=x_train,
+            y_train=y_train,
+            x_test=x_test,
+            y_test=y_test,
+            vault=vault_from_partition(partition_id, x_train, x_test),
         )
     data = generate_desk_data_legacy(partition_id)
     if persist:
@@ -149,6 +159,8 @@ def _evaluate_secure(msg: Message, context: Context, data: DeskData) -> Message:
 def train(msg: Message, context: Context) -> Message:
     partition_id = int(context.node_config["partition-id"])
     data = _resolve_desk_data(partition_id, persist=True)
+    # Vault stays in this process. It is not attached to the reply.
+    require_local_vault(data, partition_id)
 
     if bool(context.run_config["secure-aggregation"]):
         return _train_secure(msg, context, data)
@@ -186,6 +198,8 @@ def train(msg: Message, context: Context) -> Message:
 def evaluate(msg: Message, context: Context) -> Message:
     partition_id = int(context.node_config["partition-id"])
     data = _resolve_desk_data(partition_id, persist=False)
+    # Vault stays in this process. It is not attached to the reply.
+    require_local_vault(data, partition_id)
 
     if bool(context.run_config["secure-aggregation"]):
         return _evaluate_secure(msg, context, data)
