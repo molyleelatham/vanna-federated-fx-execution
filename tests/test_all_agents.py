@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from vanna_agent.agents import (
     AGENT_REGISTRY,
+    HANDOFF_CHAIN,
     CounterpartyRiskAgent,
     GovernanceAgent,
     LastLookAgent,
@@ -9,6 +10,14 @@ from vanna_agent.agents import (
     MarginAgent,
     OrchestratorAgent,
     VannaAgent,
+)
+from vanna_agent.agents.interfaces import (
+    CounterpartyRiskLike,
+    GovernanceLike,
+    LastLookLike,
+    ManipulationWatchLike,
+    MarginLike,
+    VannaLike,
 )
 from vanna_agent.agents.contracts import (
     GovernanceContext,
@@ -59,6 +68,30 @@ def scenario():
         now=datetime(2026, 8, 26, 11, 35, tzinfo=UTC),
     )
     return order, evidence, recommendation
+
+
+def test_orchestrator_wires_main_agent_interfaces() -> None:
+    orchestrator = OrchestratorAgent()
+    assert isinstance(orchestrator.vanna, VannaAgent)
+    assert isinstance(orchestrator.last_look, LastLookAgent)
+    assert isinstance(orchestrator.counterparty_risk, CounterpartyRiskAgent)
+    assert isinstance(orchestrator.margin, MarginAgent)
+    assert isinstance(orchestrator.manipulation_watch, ManipulationWatch)
+    assert isinstance(orchestrator.governance, GovernanceAgent)
+    vanna: VannaLike = orchestrator.vanna
+    last_look: LastLookLike = orchestrator.last_look
+    counterparty: CounterpartyRiskLike = orchestrator.counterparty_risk
+    margin: MarginLike = orchestrator.margin
+    manipulation: ManipulationWatchLike = orchestrator.manipulation_watch
+    governance: GovernanceLike = orchestrator.governance
+    assert vanna.name == "Vanna"
+    assert last_look.name == "LastLookAgent"
+    assert counterparty.name == "CounterpartyRiskAgent"
+    assert margin.name == "MarginAgent"
+    assert manipulation.name == "ManipulationWatch"
+    assert governance.name == "GovernanceAgent"
+    assert HANDOFF_CHAIN[0] == "Vanna"
+    assert HANDOFF_CHAIN[-1] == "GovernanceAgent"
 
 
 def test_registry_contains_every_documented_agent() -> None:
